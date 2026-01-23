@@ -1,5 +1,7 @@
 # the final binary
 calwm
+# the final (OLD) binary
+mywm
 # Object files
 *.o
 
