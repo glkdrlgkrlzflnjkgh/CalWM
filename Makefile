@@ -4,7 +4,7 @@ LDFLAGS = -lX11 -lXext -lXinerama -lXft
 
 SRC = main.c
 OBJ = $(SRC:.c=.o)
-BIN = mywm
+BIN = calwm
 
 all: $(BIN)
 
