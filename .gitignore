@@ -1,0 +1,19 @@
+# the final binary
+calwm
+# Object files
+*.o
+
+# Dependency files
+*.d
+*.dep
+
+# Common Make outputs
+*.a
+*.so
+*.out
+*.elf
+a.out
+
+# Libtool artifacts (if they ever appear)
+*.lo
+*.la
