@@ -246,7 +246,7 @@ static void manage(Window w) {
         bg_color
     );
 
-    XSelectInput(dpy, c->frame,
+    XSelectInput(dpy, c->win,
                  ExposureMask |
                  ButtonPressMask |
                  ButtonReleaseMask |
@@ -257,11 +257,11 @@ static void manage(Window w) {
     XAddToSaveSet(dpy, c->win);
     XReparentWindow(dpy, c->win, c->frame, 0, TITLE_HEIGHT);
 
-    XGrabButton(dpy, Button1, AnyModifier, c->frame, True,
+    XGrabButton(dpy, Button1, AnyModifier, c->titlebar, True,
                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
                 GrabModeAsync, GrabModeAsync, None, None);
 
-    XGrabButton(dpy, Button3, AnyModifier, c->frame, True,
+    XGrabButton(dpy, Button3, AnyModifier, c->titlebar, True,
                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
                 GrabModeAsync, GrabModeAsync, None, None);
 
