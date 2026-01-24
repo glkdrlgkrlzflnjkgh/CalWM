@@ -1,0 +1,13 @@
+Source: calwm
+Section: x11
+Priority: optional
+Maintainer: Callum <xcallumnicx@outlook.com>
+Build-Depends: debhelper-compat (= 13), gcc, make, libx11-dev
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: calwm
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Lightweight X11 window manager
+ A simple, fast, MIT-licensed window manager for X11.

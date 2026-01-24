@@ -1,0 +1,41 @@
+.TH CALWM 1 "January 2026" "calwm 0.1" "User Commands"
+.SH NAME
+calwm \- a minimal X11 window manager
+
+.SH SYNOPSIS
+.B calwm
+.RI [ options ]
+
+.SH DESCRIPTION
+.B calwm
+is a lightweight, minimalistic window manager for the X Window System.
+It manages windows, handles basic keyboard input, and provides a simple
+tiling and stacking workflow.
+
+.SH OPTIONS
+Currently, calwm does not accept command-line options. It is typically
+started from a \fI.xinitrc\fR or a display manager session file.
+
+.SH USAGE
+To start calwm manually:
+.PP
+.EX
+$ calwm
+.EE
+
+To use calwm as your default window manager, add the following to
+\fI~/.xinitrc\fR:
+.PP
+.EX
+exec calwm
+.EE
+
+.SH AUTHOR
+Written by Callum.
+
+.SH LICENSE
+MIT License.
+
+.SH SEE ALSO
+.BR X (7),
+.BR xinit (1)
