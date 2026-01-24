@@ -20,7 +20,8 @@
 3. Damn wayland (Because writing a compositor would probably end with me dying of old age 5 seconds before I push my changes, and also. I dont want wayland because its a buggy mess, oh and I will go full rant mode if you ask me to add wayland. *seriously.*)
 4. "Eye candy" features (They waste performance and add unnecassary programming work. Im one person. not 20!)
 
-
+# KNOWN ISSUES
+1. for some reason, clicking and dragging in chromium when there is no button will cause the content to be dragged. I have NO IDEA why this happens. Please tell me if you have found a patch.
 
 # SCREENSHOTS!
 <p align="center">
