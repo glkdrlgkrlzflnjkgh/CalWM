@@ -24,5 +24,5 @@
 
 # SCREENSHOTS!
 <p align="center">
-  <img src="screenshots/screenshot_001.png" alt="CalWM Screenshot">
+  <img src="screenshots/screenshot_001.png" alt="CalWM running Xterm, Xclock and Xeyes">
 </p>
