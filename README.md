@@ -10,3 +10,7 @@
 3. ensure you have make installed (you'll need it to compile CalWM!) (sudo apt install make) though do note that make is yes builtin on many distros.
 4. cd into the cloned repository and run the make command.
 5. If all goes well. and the build succeeds. you have successfully built CalWM from source!
+
+
+# WHAT CALWM WILL *NEVER* INCLUDE
+` *(A non exhaustive list of what I will banish from CalWM faster than you can say wayland is good.)*
