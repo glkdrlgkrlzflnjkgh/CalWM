@@ -17,4 +17,5 @@
 
 1. Telementery (Because nobody enjoys corporate stealing our data and selling it to a random hacker called bob living in his grandma's basement...)
 2. AI integration (Because AI lies. ALOT. And I *REALLY REALLY REALLY REALLY* do not want AI bloat cluttering everyone's lives.)
-3. Damn wayland (Because writing a compositor would probably end with me dying of old age 5 seconds before I push my changes.)
+3. Damn wayland (Because writing a compositor would probably end with me dying of old age 5 seconds before I push my changes, and also. I dont want wayland because its a buggy mess, oh and I will go full rant mode if you ask me to add wayland. *seriously.*)
+4. "Eye candy" features (They waste performance and add unnecassary programming work. Im one person. not 20!)
