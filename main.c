@@ -1,228 +1,211 @@
-// main.c - CalWM: a tiny floating Xlib window manager
-// Features:
-//  - Frame windows with titlebars
-//  - Draggable windows (left mouse on titlebar only)
-//  - Resizable windows (right mouse on frame)
-//  - Close button in titlebar
-//  - Simple taskbar with clickable window buttons
-//  - Input focus on click
-//  - Raise on focus
-//  - Mod4 + Q to quit
-//  - Global X error handler (BadWindow-safe, xterm/xeyes-safe)
+// CalWM-style minimal window manager
+// - frame + titlebar + close button
+// - click-to-focus + raise
+// - simple taskbar
+// - robust XError handler
+// - windows fully removed on close (Unmap + Destroy)
+// - WM only creates/destroys its own windows; never pokes dead clients
+// - proper Expose handling during moves
+// - normal left-click input (no weird middle+left combo)
+// - Alt + RightClick + drag to resize from bottom-right
 
 #include <X11/Xlib.h>
-#include <X11/keysym.h>
+#include <X11/Xutil.h>
 #include <X11/Xatom.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define TITLE_HEIGHT      24
-#define BORDER_WIDTH      2
-#define CLOSE_SIZE        18
-#define TASKBAR_HEIGHT    28
-#define TASK_BUTTON_WIDTH 140
+#define BORDER_WIDTH   2
+#define TITLE_HEIGHT   24
+#define TASKBAR_HEIGHT 24
+#define CLOSE_WIDTH    20
+#define MIN_WIDTH      80
+#define MIN_HEIGHT     60
 
 typedef struct Client {
-    Window win;      // client window
-    Window frame;    // frame window (with titlebar)
-    int x, y, w, h;  // client geometry
+    Window win;       // client window
+    Window frame;     // outer frame
+    Window titlebar;  // titlebar window
+    int x, y, w, h;
+    char *name;
     struct Client *next;
 } Client;
 
 static Display *dpy;
 static int screen;
 static Window root;
-static Window taskbar = 0;
-static unsigned int modkey = Mod1Mask; // alt key
-
+static Window taskbar;
 static Client *clients = NULL;
-static Client *focused = NULL;
-static int running = 1;
 
-static GC gc;
-static unsigned long fg_color;
-static unsigned long bg_color;
 static unsigned long border_focus;
 static unsigned long border_unfocus;
+static unsigned long bg_color;
+static unsigned long title_bg;
+static unsigned long title_fg;
+static unsigned long taskbar_bg;
+static unsigned long taskbar_fg;
 
-// ---------- Global X error handler ----------
+static Atom WM_DELETE_WINDOW;
+static Atom WM_PROTOCOLS;
+static Atom WM_NAME_ATOM;
+
+/* ---------- Error handling ---------- */
 
 static int xerror(Display *d, XErrorEvent *e) {
-    // Swallow common async errors that happen when windows die:
-    // BadWindow, BadMatch, BadDrawable, etc.
-    switch (e->error_code) {
-    case BadWindow:
-    case BadMatch:
-    case BadDrawable:
-        return 0;
-    default:
-        fprintf(stderr,
-                "XError: code=%d req=%d minor=%d resource=0x%lx\n",
-                e->error_code,
-                e->request_code,
-                e->minor_code,
-                e->resourceid);
-        return 0;
-    }
+    (void)d;
+    (void)e;
+    // Window managers hit BadWindow all the time when clients die.
+    // Swallow everything; stability > noise.
+    return 0;
 }
 
-// ---------- Client lookup ----------
+/* ---------- Client lookup helpers ---------- */
 
-static Client *find_client_by_window(Window w) {
+static Client *find_client_any(Window w) {
     for (Client *c = clients; c; c = c->next) {
-        if (c->win == w || c->frame == w)
+        if (c->win == w || c->frame == w || c->titlebar == w)
             return c;
     }
     return NULL;
 }
 
-// Forward declarations
-static void draw_title(Client *c);
-static void draw_taskbar(void);
-
-// ---------- Taskbar ----------
-
-static void draw_taskbar(void) {
-    if (!taskbar)
-        return;
-
-    XClearWindow(dpy, taskbar);
-
-    int x = 4;
+static Client *find_client_by_win(Window w) {
     for (Client *c = clients; c; c = c->next) {
-        int w = TASK_BUTTON_WIDTH;
-
-        if (c == focused) {
-            XSetForeground(dpy, gc, border_focus);
-        } else {
-            XSetForeground(dpy, gc, border_unfocus);
-        }
-
-        XFillRectangle(dpy, taskbar, gc, x, 4, w, TASKBAR_HEIGHT - 8);
-
-        char *name = NULL;
-        if (!XFetchName(dpy, c->win, &name) || !name) {
-            name = "Window";
-        }
-
-        XSetForeground(dpy, gc, bg_color);
-        XDrawString(dpy, taskbar, gc, x + 6, TASKBAR_HEIGHT - 10,
-                    name, strlen(name));
-
-        if (name && strcmp(name, "Window") != 0)
-            XFree(name);
-
-        x += w + 4;
+        if (c->win == w)
+            return c;
     }
+    return NULL;
 }
-
-// ---------- Focus ----------
-
-static void focus_client(Client *c) {
-    if (!c) return;
-
-    focused = c;
-
-    XSetInputFocus(dpy, c->win, RevertToPointerRoot, CurrentTime);
-    XRaiseWindow(dpy, c->frame);
-
-    for (Client *it = clients; it; it = it->next) {
-        if (it == c) {
-            XSetWindowBorder(dpy, it->frame, border_focus);
-        } else {
-            XSetWindowBorder(dpy, it->frame, border_unfocus);
-        }
-        draw_title(it);
-    }
-
-    draw_taskbar();
-}
-
-// ---------- Client list management ----------
 
 static void add_client(Client *c) {
     c->next = clients;
     clients = c;
-    draw_taskbar();
 }
 
-static void remove_client(Client *c) {
+/* ---------- Client metadata ---------- */
+
+static int window_alive(Window w) {
+    XWindowAttributes attr;
+    return XGetWindowAttributes(dpy, w, &attr) != 0;
+}
+
+static void update_client_name(Client *c) {
     if (!c) return;
-    Client **pc = &clients;
-    while (*pc) {
-        if (*pc == c) {
-            *pc = c->next;
-            free(c);
-            draw_taskbar();
-            return;
-        }
-        pc = &(*pc)->next;
+    if (!window_alive(c->win)) return;
+
+    XTextProperty prop;
+    if (XGetWMName(dpy, c->win, &prop) && prop.value && prop.nitems) {
+        free(c->name);
+        c->name = strndup((char *)prop.value, prop.nitems);
+        XFree(prop.value);
+    } else {
+        if (!c->name) c->name = strdup("CalWM window");
     }
 }
 
-// ---------- Unmanage ----------
+/* ---------- Focus and drawing ---------- */
 
-static void unmanage(Window w) {
-    Client *c = find_client_by_window(w);
+static void focus_client(Client *c) {
     if (!c) return;
+    if (!window_alive(c->win)) return;
 
-    XUnmapWindow(dpy, c->frame);
-    XReparentWindow(dpy, c->win, root, c->x, c->y);
-    XRemoveFromSaveSet(dpy, c->win);
-    XDestroyWindow(dpy, c->frame);
+    XRaiseWindow(dpy, c->frame);
+    XSetInputFocus(dpy, c->win, RevertToPointerRoot, CurrentTime);
 
-    if (focused == c)
-        focused = NULL;
-
-    remove_client(c);
+    for (Client *it = clients; it; it = it->next) {
+        unsigned long col = (it == c) ? border_focus : border_unfocus;
+        XSetWindowBorder(dpy, it->frame, col);
+    }
 }
-
-// ---------- Title drawing ----------
 
 static void draw_title(Client *c) {
     if (!c) return;
+    GC gc = XCreateGC(dpy, c->titlebar, 0, NULL);
 
-    XClearWindow(dpy, c->frame);
+    XSetForeground(dpy, gc, title_bg);
+    XFillRectangle(dpy, c->titlebar, gc, 0, 0, c->w, TITLE_HEIGHT);
 
-    XSetForeground(dpy, gc, bg_color);
-    XFillRectangle(dpy, c->frame, gc,
-                   0, 0, c->w, TITLE_HEIGHT);
+    // close button
+    XSetForeground(dpy, gc, border_unfocus);
+    XFillRectangle(dpy, c->titlebar, gc,
+                   c->w - CLOSE_WIDTH, 0, CLOSE_WIDTH, TITLE_HEIGHT);
+    XSetForeground(dpy, gc, title_fg);
+    XDrawString(dpy, c->titlebar, gc,
+                c->w - CLOSE_WIDTH + 6, TITLE_HEIGHT - 8, "X", 1);
 
-    char *name = NULL;
-    if (!XFetchName(dpy, c->win, &name) || !name) {
-        name = "CalWM";
+    update_client_name(c);
+    if (c->name) {
+        XSetForeground(dpy, gc, title_fg);
+        XDrawString(dpy, c->titlebar, gc, 4, TITLE_HEIGHT - 8,
+                    c->name, (int)strlen(c->name));
     }
 
-    XSetForeground(dpy, gc, fg_color);
-    int baseline = TITLE_HEIGHT / 2 + 5;
-    XDrawString(dpy, c->frame, gc, 8, baseline,
-                name, strlen(name));
-
-    if (name && strcmp(name, "CalWM") != 0)
-        XFree(name);
-
-    int bx = c->w - CLOSE_SIZE - 4;
-    int by = (TITLE_HEIGHT - CLOSE_SIZE) / 2;
-
-    XSetForeground(dpy, gc, fg_color);
-    XFillRectangle(dpy, c->frame, gc,
-                   bx, by, CLOSE_SIZE, CLOSE_SIZE);
-
-    XSetForeground(dpy, gc, bg_color);
-    XDrawLine(dpy, c->frame, gc,
-              bx + 3, by + 3,
-              bx + CLOSE_SIZE - 3, by + CLOSE_SIZE - 3);
-    XDrawLine(dpy, c->frame, gc,
-              bx + CLOSE_SIZE - 3, by + 3,
-              bx + 3, by + CLOSE_SIZE - 3);
+    XFreeGC(dpy, gc);
 }
 
-// ---------- Manage new window ----------
+static void draw_taskbar(void) {
+    GC gc = XCreateGC(dpy, taskbar, 0, NULL);
+    int sw = DisplayWidth(dpy, screen);
+
+    XSetForeground(dpy, gc, taskbar_bg);
+    XFillRectangle(dpy, taskbar, gc, 0, 0, sw, TASKBAR_HEIGHT);
+
+    int count = 0;
+    for (Client *c = clients; c; c = c->next) count++;
+    if (count == 0) {
+        XFreeGC(dpy, gc);
+        return;
+    }
+
+    int slot = sw / count;
+    int i = 0;
+
+    for (Client *c = clients; c; c = c->next, i++) {
+        int x = i * slot;
+        XSetForeground(dpy, gc, border_unfocus);
+        XDrawRectangle(dpy, taskbar, gc, x, 0, slot - 1, TASKBAR_HEIGHT - 1);
+
+        update_client_name(c);
+        const char *name = c->name ? c->name : "CalWM";
+        XSetForeground(dpy, gc, taskbar_fg);
+        XDrawString(dpy, taskbar, gc, x + 4, TASKBAR_HEIGHT - 8,
+                    name, (int)strlen(name));
+    }
+
+    XFreeGC(dpy, gc);
+}
+
+/* ---------- Manage / unmanage ---------- */
+
+static void unmanage(Client *c) {
+    if (!c) return;
+
+    // Remove from list first so nothing else can find it.
+    if (clients == c) {
+        clients = c->next;
+    } else {
+        Client *p = clients;
+        while (p && p->next != c) p = p->next;
+        if (p) p->next = c->next;
+    }
+
+    // Destroy only our own windows. Titlebar dies with frame.
+    XDestroyWindow(dpy, c->frame);
+
+    free(c->name);
+    free(c);
+
+    draw_taskbar();
+}
 
 static void manage(Window w) {
     XWindowAttributes attr;
     if (!XGetWindowAttributes(dpy, w, &attr) || attr.override_redirect)
+        return;
+
+    // Don't manage our own windows (taskbar, frames, titlebars).
+    if (w == taskbar || find_client_any(w))
         return;
 
     Client *c = calloc(1, sizeof(Client));
@@ -234,7 +217,11 @@ static void manage(Window w) {
     c->w = attr.width;
     c->h = attr.height;
 
-    unsigned long border = border_unfocus;
+    int sw = DisplayWidth(dpy, screen);
+    int sh = DisplayHeight(dpy, screen);
+
+    if (c->y + c->h + TITLE_HEIGHT > sh - TASKBAR_HEIGHT)
+        c->y = sh - TASKBAR_HEIGHT - (c->h + TITLE_HEIGHT);
 
     c->frame = XCreateSimpleWindow(
         dpy, root,
@@ -242,94 +229,424 @@ static void manage(Window w) {
         c->w,
         c->h + TITLE_HEIGHT,
         BORDER_WIDTH,
-        border,
+        border_unfocus,
         bg_color
     );
 
-    XSelectInput(dpy, c->win,
+    c->titlebar = XCreateSimpleWindow(
+        dpy, c->frame,
+        0, 0,
+        c->w,
+        TITLE_HEIGHT,
+        0,
+        border_unfocus,
+        title_bg
+    );
+
+    XSelectInput(dpy, c->frame,
                  ExposureMask |
                  ButtonPressMask |
                  ButtonReleaseMask |
                  PointerMotionMask |
-                 SubstructureRedirectMask |
-                 SubstructureNotifyMask);
+                 SubstructureNotifyMask);  // see child Unmap/Destroy
 
-    XAddToSaveSet(dpy, c->win);
+    XSelectInput(dpy, c->titlebar,
+                 ExposureMask |
+                 ButtonPressMask |
+                 ButtonReleaseMask |
+                 PointerMotionMask);
+
+    // NORMAL input on client: no passive grab, just listen for ButtonPress.
+    XSelectInput(dpy, c->win,
+                 PropertyChangeMask |
+                 EnterWindowMask |
+                 LeaveWindowMask |
+                 FocusChangeMask |
+                 ButtonPressMask);
+
+    // Reparent client into our frame
     XReparentWindow(dpy, c->win, c->frame, 0, TITLE_HEIGHT);
 
-    XGrabButton(dpy, Button1, AnyModifier, c->titlebar, True,
-                ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                GrabModeAsync, GrabModeAsync, None, None);
-
-    XGrabButton(dpy, Button3, AnyModifier, c->titlebar, True,
-                ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
-                GrabModeAsync, GrabModeAsync, None, None);
+    XSetWMProtocols(dpy, c->win, &WM_DELETE_WINDOW, 1);
 
     XMapWindow(dpy, c->win);
+    XMapWindow(dpy, c->titlebar);
     XMapWindow(dpy, c->frame);
 
+    update_client_name(c);
     add_client(c);
     focus_client(c);
+    draw_title(c);
+    draw_taskbar();
 }
 
-// ---------- Setup ----------
+/* ---------- Forward declarations for dispatcher ---------- */
 
-static void setup_colors_and_gc(void) {
-    screen = DefaultScreen(dpy);
-    root = RootWindow(dpy, screen);
+static void handle_map_request(XEvent *e);
+static void handle_destroy_notify(XEvent *e);
+static void handle_unmap_notify(XEvent *e);
+static void handle_configure_request(XEvent *e);
+static void handle_client_message(XEvent *e);
+static void handle_button_press(XEvent *e);
+static void handle_expose(XEvent *e);
+static void handle_property_notify(XEvent *e);
 
-    fg_color = BlackPixel(dpy, screen);
-    bg_color = WhitePixel(dpy, screen);
+/* ---------- Event dispatcher (used in move/resize loops) ---------- */
 
-    border_focus = BlackPixel(dpy, screen);
-    border_unfocus = BlackPixel(dpy, screen);
-
-    gc = XCreateGC(dpy, root, 0, NULL);
-    XSetForeground(dpy, gc, fg_color);
-    XSetBackground(dpy, gc, bg_color);
+static void dispatch_event(XEvent *e) {
+    switch (e->type) {
+    case MapRequest:
+        handle_map_request(e);
+        break;
+    case DestroyNotify:
+        handle_destroy_notify(e);
+        break;
+    case UnmapNotify:
+        handle_unmap_notify(e);
+        break;
+    case ConfigureRequest:
+        handle_configure_request(e);
+        break;
+    case ClientMessage:
+        handle_client_message(e);
+        break;
+    case ButtonPress:
+        handle_button_press(e);
+        break;
+    case Expose:
+        handle_expose(e);
+        break;
+    case PropertyNotify:
+        handle_property_notify(e);
+        break;
+    default:
+        break;
+    }
 }
 
-static void create_taskbar(void) {
+/* ---------- Alt+Right drag resize ---------- */
+
+static void start_resize(Client *c, int start_x, int start_y) {
+    int orig_w = c->w;
+    int orig_h = c->h;
+
+    XGrabPointer(dpy, root, False,
+                 PointerMotionMask | ButtonReleaseMask,
+                 GrabModeAsync, GrabModeAsync,
+                 None, None, CurrentTime);
+
+    for (;;) {
+        XEvent ev;
+        XNextEvent(dpy, &ev);
+
+        if (ev.type == MotionNotify) {
+            int dx = ev.xmotion.x_root - start_x;
+            int dy = ev.xmotion.y_root - start_y;
+
+            int new_w = orig_w + dx;
+            int new_h = orig_h + dy;
+
+            if (new_w < MIN_WIDTH)  new_w = MIN_WIDTH;
+            if (new_h < MIN_HEIGHT) new_h = MIN_HEIGHT;
+
+            c->w = new_w;
+            c->h = new_h;
+
+            XMoveResizeWindow(dpy, c->frame,
+                              c->x, c->y,
+                              c->w,
+                              c->h + TITLE_HEIGHT);
+            XMoveResizeWindow(dpy, c->win,
+                              0, TITLE_HEIGHT,
+                              c->w, c->h);
+            XMoveResizeWindow(dpy, c->titlebar,
+                              0, 0,
+                              c->w, TITLE_HEIGHT);
+
+            draw_title(c);
+            draw_taskbar();
+        } else if (ev.type == ButtonRelease) {
+            break;
+        } else {
+            // Keep handling other events (Expose, etc.) during resize.
+            dispatch_event(&ev);
+        }
+    }
+
+    XUngrabPointer(dpy, CurrentTime);
+}
+
+/* ---------- Event handlers ---------- */
+
+static void handle_map_request(XEvent *e) {
+    XMapRequestEvent *ev = &e->xmaprequest;
+
+    // Ignore our own windows.
+    if (ev->window == taskbar || find_client_any(ev->window))
+        return;
+
+    if (!find_client_by_win(ev->window)) {
+        manage(ev->window);
+    }
+}
+
+static void handle_destroy_notify(XEvent *e) {
+    XDestroyWindowEvent *ev = &e->xdestroywindow;
+    Client *c = find_client_by_win(ev->window);
+    if (c) {
+        unmanage(c);
+    }
+}
+
+static void handle_unmap_notify(XEvent *e) {
+    XUnmapEvent *ev = &e->xunmap;
+    Client *c = find_client_by_win(ev->window);
+    if (!c) return;
+
+    // Many toolkits "close" by unmapping; treat that as gone.
+    unmanage(c);
+}
+
+static void handle_configure_request(XEvent *e) {
+    XConfigureRequestEvent *ev = &e->xconfigurerequest;
+    Client *c = find_client_by_win(ev->window);
+
+    XWindowChanges wc;
+    wc.x = ev->x;
+    wc.y = ev->y;
+    wc.width = ev->width;
+    wc.height = ev->height;
+    wc.border_width = ev->border_width;
+    wc.sibling = ev->above;
+    wc.stack_mode = ev->detail;
+
+    if (c) {
+        c->w = ev->width;
+        c->h = ev->height;
+        XConfigureWindow(dpy, c->frame,
+                         CWX | CWY | CWWidth | CWHeight | CWStackMode, &wc);
+        XMoveResizeWindow(dpy, c->win, 0, TITLE_HEIGHT, c->w, c->h);
+        XMoveResizeWindow(dpy, c->titlebar, 0, 0, c->w, TITLE_HEIGHT);
+        draw_title(c);
+        draw_taskbar();
+    } else {
+        XConfigureWindow(dpy, ev->window, ev->value_mask, &wc);
+    }
+}
+
+static void handle_client_message(XEvent *e) {
+    XClientMessageEvent *ev = &e->xclient;
+    if (ev->message_type == WM_PROTOCOLS &&
+        (Atom)ev->data.l[0] == WM_DELETE_WINDOW) {
+        Client *c = find_client_by_win(ev->window);
+        if (c) {
+            // Ask client to close; visuals will disappear on Unmap/Destroy.
+            XEvent msg = *e;
+            msg.xclient.window = c->win;
+            XSendEvent(dpy, c->win, False, NoEventMask, &msg);
+        }
+    }
+}
+
+static void handle_button_press(XEvent *e) {
+    XButtonEvent *ev = &e->xbutton;
+
+    if (ev->window == taskbar) {
+        int count = 0;
+        for (Client *c = clients; c; c = c->next) count++;
+        if (count == 0) return;
+
+        int sw = DisplayWidth(dpy, screen);
+        int slot = sw / count;
+        int index = ev->x / (slot ? slot : 1);
+
+        int i = 0;
+        for (Client *c = clients; c; c = c->next, i++) {
+            if (i == index) {
+                focus_client(c);
+                draw_taskbar();
+                break;
+            }
+        }
+        return;
+    }
+
+    Client *c = find_client_any(ev->window);
+    if (!c) return;
+
+    // Alt + RightClick anywhere on the window: resize from bottom-right.
+    if ((ev->state & Mod1Mask) && ev->button == Button3) {
+        focus_client(c);
+        draw_taskbar();
+        start_resize(c, ev->x_root, ev->y_root);
+        return;
+    }
+
+    // click on client content: focus + let client handle the click
+    if (ev->window == c->win && ev->button == Button1) {
+        focus_client(c);
+        draw_taskbar();
+        return;
+    }
+
+    if (ev->window == c->titlebar && ev->button == Button1) {
+        // close button
+        if (ev->x >= c->w - CLOSE_WIDTH) {
+            if (WM_DELETE_WINDOW != None) {
+                XEvent msg;
+                memset(&msg, 0, sizeof(msg));
+                msg.xclient.type = ClientMessage;
+                msg.xclient.window = c->win;
+                msg.xclient.message_type = WM_PROTOCOLS;
+                msg.xclient.format = 32;
+                msg.xclient.data.l[0] = WM_DELETE_WINDOW;
+                msg.xclient.data.l[1] = CurrentTime;
+                XSendEvent(dpy, c->win, False, NoEventMask, &msg);
+            } else {
+                // Fallback: kill client if it doesn't support WM_DELETE_WINDOW.
+                XKillClient(dpy, c->win);
+            }
+            // Wait for Unmap/Destroy to unmanage.
+            return;
+        }
+
+        // start move
+        int start_x = ev->x_root;
+        int start_y = ev->y_root;
+        int orig_x = c->x;
+        int orig_y = c->y;
+
+        focus_client(c);
+        draw_taskbar();
+
+        XGrabPointer(dpy, root, False,
+                     PointerMotionMask | ButtonReleaseMask,
+                     GrabModeAsync, GrabModeAsync,
+                     None, None, CurrentTime);
+
+        for (;;) {
+            XEvent ev2;
+            XNextEvent(dpy, &ev2);
+            if (ev2.type == MotionNotify) {
+                XMotionEvent *mv = &ev2.xmotion;
+                int dx = mv->x_root - start_x;
+                int dy = mv->y_root - start_y;
+                c->x = orig_x + dx;
+                c->y = orig_y + dy;
+                XMoveWindow(dpy, c->frame, c->x, c->y);
+            } else if (ev2.type == ButtonRelease) {
+                break;
+            } else {
+                // Don't drop Expose/Map/etc. while moving; handle them.
+                dispatch_event(&ev2);
+            }
+        }
+
+        XUngrabPointer(dpy, CurrentTime);
+        return;
+    }
+
+    if (ev->window == c->frame && ev->button == Button1) {
+        // For now: just focus on frame click.
+        focus_client(c);
+        draw_taskbar();
+    }
+}
+
+static void handle_expose(XEvent *e) {
+    XExposeEvent *ev = &e->xexpose;
+    if (ev->window == taskbar) {
+        draw_taskbar();
+        return;
+    }
+    Client *c = find_client_any(ev->window);
+    if (c && ev->window == c->titlebar) {
+        draw_title(c);
+    }
+}
+
+static void handle_property_notify(XEvent *e) {
+    XPropertyEvent *ev = &e->xproperty;
+    if (ev->state == PropertyNewValue && ev->atom == WM_NAME_ATOM) {
+        Client *c = find_client_by_win(ev->window);
+        if (c) {
+            update_client_name(c);
+            draw_title(c);
+            draw_taskbar();
+        }
+    }
+}
+
+/* ---------- Setup ---------- */
+
+static void setup_colors(void) {
+    Colormap cmap = DefaultColormap(dpy, screen);
+    XColor col;
+
+    XParseColor(dpy, cmap, "#3b4252", &col);
+    XAllocColor(dpy, cmap, &col);
+    bg_color = col.pixel;
+
+    XParseColor(dpy, cmap, "#88c0d0", &col);
+    XAllocColor(dpy, cmap, &col);
+    border_focus = col.pixel;
+
+    XParseColor(dpy, cmap, "#4c566a", &col);
+    XAllocColor(dpy, cmap, &col);
+    border_unfocus = col.pixel;
+
+    XParseColor(dpy, cmap, "#2e3440", &col);
+    XAllocColor(dpy, cmap, &col);
+    title_bg = col.pixel;
+
+    XParseColor(dpy, cmap, "#eceff4", &col);
+    XAllocColor(dpy, cmap, &col);
+    title_fg = col.pixel;
+
+    XParseColor(dpy, cmap, "#3b4252", &col);
+    XAllocColor(dpy, cmap, &col);
+    taskbar_bg = col.pixel;
+
+    XParseColor(dpy, cmap, "#d8dee9", &col);
+    XAllocColor(dpy, cmap, &col);
+    taskbar_fg = col.pixel;
+}
+
+static void setup_taskbar(void) {
     int sw = DisplayWidth(dpy, screen);
     int sh = DisplayHeight(dpy, screen);
 
-    taskbar = XCreateSimpleWindow(
+    XSetWindowAttributes wa;
+    wa.override_redirect = True;  // don't manage our own taskbar
+    wa.background_pixel = taskbar_bg;
+    wa.border_pixel = border_unfocus;
+
+    taskbar = XCreateWindow(
         dpy, root,
         0, sh - TASKBAR_HEIGHT,
         sw, TASKBAR_HEIGHT,
         0,
-        BlackPixel(dpy, screen),
-        WhitePixel(dpy, screen)
+        DefaultDepth(dpy, screen),
+        CopyFromParent,
+        DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel,
+        &wa
     );
 
     XSelectInput(dpy, taskbar,
                  ExposureMask |
-                 ButtonPressMask);
+                 ButtonPressMask |
+                 ButtonReleaseMask);
 
     XMapWindow(dpy, taskbar);
 }
 
-static void grab_keys(void) {
-    XUngrabKey(dpy, AnyKey, AnyModifier, root);
-
-    KeyCode q = XKeysymToKeycode(dpy, XStringToKeysym("q"));
-    XGrabKey(dpy, q, modkey, root, True,
-             GrabModeAsync, GrabModeAsync);
-}
-
-// ---------- main ----------
+/* ---------- main ---------- */
 
 int main(void) {
-    printf("Starting up... \n");
-    XEvent ev;
-    int moving = 0, resizing = 0;
-    int start_x = 0, start_y = 0;
-    int orig_x = 0, orig_y = 0, orig_w = 0, orig_h = 0;
-    Client *drag_client = NULL;
-    printf("Connecting to the X11 server... \n");
     dpy = XOpenDisplay(NULL);
     if (!dpy) {
-        fprintf(stderr, "Failed to connect to X server\n");
+        fprintf(stderr, "Cannot open display\n");
         return 1;
     }
 
@@ -338,233 +655,52 @@ int main(void) {
     screen = DefaultScreen(dpy);
     root = RootWindow(dpy, screen);
 
-    printf("Connected to X server\n");
+    setup_colors();
 
-    setup_colors_and_gc();
-    grab_keys();
-    create_taskbar();
+    WM_DELETE_WINDOW = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+    WM_PROTOCOLS     = XInternAtom(dpy, "WM_PROTOCOLS", False);
+    WM_NAME_ATOM     = XInternAtom(dpy, "WM_NAME", False);
 
     XSelectInput(dpy, root,
                  SubstructureRedirectMask |
-                 SubstructureNotifyMask |
                  ButtonPressMask |
-                 KeyPressMask);
+                 ButtonReleaseMask |
+                 PointerMotionMask |
+                 PropertyChangeMask);
 
-    XSync(dpy, False);
+    setup_taskbar();
 
-    while (running && !XNextEvent(dpy, &ev)) {
-        switch (ev.type) {
-        case MapRequest: {
-            XMapRequestEvent *e = &ev.xmaprequest;
-            if (!find_client_by_window(e->window))
-                manage(e->window);
+    for (;;) {
+        XEvent e;
+        XNextEvent(dpy, &e);
+
+        switch (e.type) {
+        case MapRequest:
+            handle_map_request(&e);
             break;
-        }
-
-        case ConfigureRequest: {
-            XConfigureRequestEvent *e = &ev.xconfigurerequest;
-            Client *c = find_client_by_window(e->window);
-            XWindowChanges wc;
-
-            if (c) {
-                if (e->value_mask & CWX) c->x = e->x;
-                if (e->value_mask & CWY) c->y = e->y;
-                if (e->value_mask & CWWidth) c->w = e->width;
-                if (e->value_mask & CWHeight) c->h = e->height;
-
-                wc.x = c->x;
-                wc.y = c->y;
-                wc.width = c->w;
-                wc.height = c->h + TITLE_HEIGHT;
-                wc.border_width = BORDER_WIDTH;
-                wc.sibling = e->above;
-                wc.stack_mode = e->detail;
-
-                XConfigureWindow(dpy, c->frame, e->value_mask, &wc);
-                XMoveResizeWindow(dpy, c->win,
-                                  0, TITLE_HEIGHT,
-                                  c->w, c->h);
-                draw_title(c);
-            } else {
-                wc.x = e->x;
-                wc.y = e->y;
-                wc.width = e->width;
-                wc.height = e->height;
-                wc.border_width = e->border_width;
-                wc.sibling = e->above;
-                wc.stack_mode = e->detail;
-                XConfigureWindow(dpy, e->window, e->value_mask, &wc);
-            }
+        case DestroyNotify:
+            handle_destroy_notify(&e);
             break;
-        }
-
-        case DestroyNotify: {
-            XDestroyWindowEvent *e = &ev.xdestroywindow;
-            unmanage(e->window);
+        case UnmapNotify:
+            handle_unmap_notify(&e);
             break;
-        }
-
-        case UnmapNotify: {
-            XUnmapEvent *e = &ev.xunmap;
-            Client *c = find_client_by_window(e->window);
-            if (!c) break;
-
-            if (e->window == c->win)
-                unmanage(e->window);
+        case ConfigureRequest:
+            handle_configure_request(&e);
             break;
-        }
-
-        case Expose: {
-            XExposeEvent *e = &ev.xexpose;
-            if (taskbar && e->window == taskbar) {
-                if (e->count == 0)
-                    draw_taskbar();
-            } else {
-                Client *c = find_client_by_window(e->window);
-                if (c && e->count == 0)
-                    draw_title(c);
-            }
+        case ClientMessage:
+            handle_client_message(&e);
             break;
-        }
-
-        case ButtonPress: {
-            XButtonEvent *e = &ev.xbutton;
-
-            // Taskbar click
-            if (taskbar && e->window == taskbar) {
-                int x = e->x;
-                int pos = 4;
-                for (Client *c = clients; c; c = c->next) {
-                    if (x >= pos && x <= pos + TASK_BUTTON_WIDTH) {
-                        focus_client(c);
-                        break;
-                    }
-                    pos += TASK_BUTTON_WIDTH + 4;
-                }
-                break;
-            }
-
-            Client *c = find_client_by_window(e->window);
-            if (!c) break;
-
-            focus_client(c);
-
-            // Close button
-            if (e->window == c->frame &&
-                e->y >= 0 && e->y <= TITLE_HEIGHT) {
-
-                int bx1 = c->w - CLOSE_SIZE - 4;
-                int bx2 = c->w - 4;
-                int by1 = (TITLE_HEIGHT - CLOSE_SIZE) / 2;
-                int by2 = by1 + CLOSE_SIZE;
-
-                int in_close =
-                    (e->x >= bx1 && e->x <= bx2 &&
-                     e->y >= by1 && e->y <= by2);
-
-                if (in_close && e->button == Button1) {
-                    Atom wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
-                    Atom wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", True);
-
-                    if (wm_protocols != None) {
-                        XEvent msg;
-                        memset(&msg, 0, sizeof(msg));
-                        msg.xclient.type = ClientMessage;
-                        msg.xclient.window = c->win;
-                        msg.xclient.message_type = wm_protocols;
-                        msg.xclient.format = 32;
-                        msg.xclient.data.l[0] = wm_delete;
-                        msg.xclient.data.l[1] = CurrentTime;
-                        XSendEvent(dpy, c->win, False, NoEventMask, &msg);
-                    } else {
-                        XKillClient(dpy, c->win);
-                    }
-                    break;
-                }
-
-                // Start move only if in titlebar but NOT in close button
-                int in_title = (e->y >= 0 && e->y < TITLE_HEIGHT);
-                if (in_title && !in_close && e->button == Button1) {
-                    drag_client = c;
-                    moving = 1;
-                    resizing = 0;
-
-                    start_x = e->x_root;
-                    start_y = e->y_root;
-
-                    orig_x = c->x;
-                    orig_y = c->y;
-                    orig_w = c->w;
-                    orig_h = c->h;
-                    break;
-                }
-            }
-
-            // Start resize on right-click anywhere on frame
-            if (e->window == c->frame && e->button == Button3) {
-                drag_client = c;
-                moving = 0;
-                resizing = 1;
-
-                start_x = e->x_root;
-                start_y = e->y_root;
-
-                orig_x = c->x;
-                orig_y = c->y;
-                orig_w = c->w;
-                orig_h = c->h;
-            }
-
+        case ButtonPress:
+            handle_button_press(&e);
             break;
-        }
-
-        case MotionNotify: {
-            XMotionEvent *e = &ev.xmotion;
-            if (!drag_client) break;
-
-            int dx = e->x_root - start_x;
-            int dy = e->y_root - start_y;
-
-            if (moving) {
-                drag_client->x = orig_x + dx;
-                drag_client->y = orig_y + dy;
-                XMoveWindow(dpy, drag_client->frame,
-                            drag_client->x, drag_client->y);
-            } else if (resizing) {
-                int nw = orig_w + dx;
-                int nh = orig_h + dy;
-                if (nw < 50) nw = 50;
-                if (nh < 50) nh = 50;
-                drag_client->w = nw;
-                drag_client->h = nh;
-                XMoveResizeWindow(dpy, drag_client->frame,
-                                  drag_client->x, drag_client->y,
-                                  drag_client->w,
-                                  drag_client->h + TITLE_HEIGHT);
-                XMoveResizeWindow(dpy, drag_client->win,
-                                  0, TITLE_HEIGHT,
-                                  drag_client->w,
-                                  drag_client->h);
-                draw_title(drag_client);
-            }
+        case Expose:
+            handle_expose(&e);
             break;
-        }
-
-        case ButtonRelease: {
-            moving = 0;
-            resizing = 0;
-            drag_client = NULL;
+        case PropertyNotify:
+            handle_property_notify(&e);
             break;
-        }
-
-        case KeyPress: {
-            XKeyEvent *e = &ev.xkey;
-            KeySym sym = XLookupKeysym(e, 0);
-            if ((e->state & modkey) && sym == XK_q) {
-                running = 0;
-            }
+        default:
             break;
-        }
         }
     }
 
