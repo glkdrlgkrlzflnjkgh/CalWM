@@ -13,4 +13,8 @@
 
 
 # WHAT CALWM WILL *NEVER* INCLUDE
-` *(A non exhaustive list of what I will banish from CalWM faster than you can say wayland is good.)*
+*(A non exhaustive list of what I will banish from CalWM faster than you can say wayland is good.)*
+
+1. Telementery (Because nobody enjoys corporate stealing our data and selling it to a random hacker called bob living in his grandma's basement...)
+2. AI integration (Because AI lies. ALOT. And I *REALLY REALLY REALLY REALLY* do not want AI bloat cluttering everyone's lives.)
+3. Damn wayland (Because writing a compositor would probably end with me dying of old age 5 seconds before I push my changes.)
