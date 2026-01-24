@@ -115,7 +115,7 @@ static void update_client_name(Client *c) {
         XFree(prop.value);
     } else {
         if (!c->name)
-            c->name = strdup("CalWM window");
+            c->name = strdup("<Window?>");
     }
 }
 
