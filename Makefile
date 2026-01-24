@@ -3,16 +3,16 @@ CFLAGS = -Wall -Wextra -O2
 LDFLAGS = -lX11 -lXext -lXinerama -lXft
 
 SRC = main.c
-OBJ = $(SRC:.c=.o)
-BIN = calwm
+BIN = build/calwm
 
 all: $(BIN)
 
-$(BIN): $(OBJ)
-	$(CC) $(OBJ) -o $(BIN) $(LDFLAGS)
-
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+$(BIN): $(SRC)
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $(BIN) $(SRC) $(LDFLAGS)
 
 clean:
-	rm -f $(OBJ) $(BIN)
+	rm -rf build
+	rm -f *.o
+
+.PHONY: all clean
