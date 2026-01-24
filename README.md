@@ -19,3 +19,10 @@
 2. AI integration (Because AI lies. ALOT. And I *REALLY REALLY REALLY REALLY* do not want AI bloat cluttering everyone's lives.)
 3. Damn wayland (Because writing a compositor would probably end with me dying of old age 5 seconds before I push my changes, and also. I dont want wayland because its a buggy mess, oh and I will go full rant mode if you ask me to add wayland. *seriously.*)
 4. "Eye candy" features (They waste performance and add unnecassary programming work. Im one person. not 20!)
+
+
+
+# SCREENSHOTS!
+<p align="center">
+  <img src="screenshots/screenshot_001.png" alt="CalWM Screenshot">
+</p>
