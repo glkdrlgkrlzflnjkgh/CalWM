@@ -1,25 +1,32 @@
-// CalWM-style minimal window manager
-// - frame + titlebar + close button
-// - click-to-focus + raise
-// - simple taskbar
-// - robust XError handler
-// - windows fully removed on close (Unmap + Destroy)
-// - WM only creates/destroys its own windows; never pokes dead clients
-// - proper Expose handling during moves
-// - normal left-click input (no weird middle+left combo)
+// CalWM - a small but serious X11 window manager
+// Features:
+// - Frame + titlebar + minimize / maximize / close buttons
+// - Click-to-focus + raise
+// - Simple taskbar with window list
+// - Minimize: hides frame, restores from taskbar
+// - Maximize: toggle full-screen (minus taskbar)
 // - Alt + RightClick + drag to resize from bottom-right
+// - Alt + R opens a launcher (simple command prompt)
+// - Robust XError handler
+// - Clean unmanage on Unmap/Destroy
+// - Proper Expose handling during move/resize
+// - Normal left-click input (no weird combos)
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/Xatom.h>
+#include <X11/keysym.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define BORDER_WIDTH   2
 #define TITLE_HEIGHT   24
 #define TASKBAR_HEIGHT 24
 #define CLOSE_WIDTH    20
+#define MAX_WIDTH      20
+#define MINIMIZE_WIDTH 20
 #define MIN_WIDTH      80
 #define MIN_HEIGHT     60
 
@@ -29,6 +36,11 @@ typedef struct Client {
     Window titlebar;  // titlebar window
     int x, y, w, h;
     char *name;
+
+    int minimized;
+    int maximized;
+    int old_x, old_y, old_w, old_h;
+
     struct Client *next;
 } Client;
 
@@ -36,6 +48,11 @@ static Display *dpy;
 static int screen;
 static Window root;
 static Window taskbar;
+static Window launcher;
+static int launcher_visible = 0;
+static char launcher_buf[256];
+static int launcher_len = 0;
+
 static Client *clients = NULL;
 
 static unsigned long border_focus;
@@ -45,6 +62,8 @@ static unsigned long title_bg;
 static unsigned long title_fg;
 static unsigned long taskbar_bg;
 static unsigned long taskbar_fg;
+static unsigned long launcher_bg;
+static unsigned long launcher_fg;
 
 static Atom WM_DELETE_WINDOW;
 static Atom WM_PROTOCOLS;
@@ -55,8 +74,6 @@ static Atom WM_NAME_ATOM;
 static int xerror(Display *d, XErrorEvent *e) {
     (void)d;
     (void)e;
-    // Window managers hit BadWindow all the time when clients die.
-    // Swallow everything; stability > noise.
     return 0;
 }
 
@@ -109,6 +126,7 @@ static void update_client_name(Client *c) {
 static void focus_client(Client *c) {
     if (!c) return;
     if (!window_alive(c->win)) return;
+    if (c->minimized) return;
 
     XRaiseWindow(dpy, c->frame);
     XSetInputFocus(dpy, c->win, RevertToPointerRoot, CurrentTime);
@@ -126,13 +144,34 @@ static void draw_title(Client *c) {
     XSetForeground(dpy, gc, title_bg);
     XFillRectangle(dpy, c->titlebar, gc, 0, 0, c->w, TITLE_HEIGHT);
 
-    // close button
+    // Close button (rightmost)
+    int close_x = c->w - CLOSE_WIDTH;
+    int max_x   = close_x - MAX_WIDTH;
+    int min_x   = max_x - MINIMIZE_WIDTH;
+
+    // Minimize button
     XSetForeground(dpy, gc, border_unfocus);
     XFillRectangle(dpy, c->titlebar, gc,
-                   c->w - CLOSE_WIDTH, 0, CLOSE_WIDTH, TITLE_HEIGHT);
+                   min_x, 0, MINIMIZE_WIDTH, TITLE_HEIGHT);
     XSetForeground(dpy, gc, title_fg);
     XDrawString(dpy, c->titlebar, gc,
-                c->w - CLOSE_WIDTH + 6, TITLE_HEIGHT - 8, "X", 1);
+                min_x + 6, TITLE_HEIGHT - 8, "_", 1);
+
+    // Maximize button
+    XSetForeground(dpy, gc, border_unfocus);
+    XFillRectangle(dpy, c->titlebar, gc,
+                   max_x, 0, MAX_WIDTH, TITLE_HEIGHT);
+    XSetForeground(dpy, gc, title_fg);
+    XDrawRectangle(dpy, c->titlebar, gc,
+                   max_x + 4, 4, MAX_WIDTH - 8, TITLE_HEIGHT - 10);
+
+    // Close button
+    XSetForeground(dpy, gc, border_unfocus);
+    XFillRectangle(dpy, c->titlebar, gc,
+                   close_x, 0, CLOSE_WIDTH, TITLE_HEIGHT);
+    XSetForeground(dpy, gc, title_fg);
+    XDrawString(dpy, c->titlebar, gc,
+                close_x + 6, TITLE_HEIGHT - 8, "X", 1);
 
     update_client_name(c);
     if (c->name) {
@@ -176,12 +215,29 @@ static void draw_taskbar(void) {
     XFreeGC(dpy, gc);
 }
 
+static void draw_launcher(void) {
+    if (!launcher_visible) return;
+    GC gc = XCreateGC(dpy, launcher, 0, NULL);
+
+    XSetForeground(dpy, gc, launcher_bg);
+    XFillRectangle(dpy, launcher, gc, 0, 0, 400, 30);
+
+    XSetForeground(dpy, gc, launcher_fg);
+    XDrawRectangle(dpy, launcher, gc, 2, 2, 396, 26);
+
+    if (launcher_len > 0) {
+        XDrawString(dpy, launcher, gc, 6, 20,
+                    launcher_buf, launcher_len);
+    }
+
+    XFreeGC(dpy, gc);
+}
+
 /* ---------- Manage / unmanage ---------- */
 
 static void unmanage(Client *c) {
     if (!c) return;
 
-    // Remove from list first so nothing else can find it.
     if (clients == c) {
         clients = c->next;
     } else {
@@ -190,7 +246,6 @@ static void unmanage(Client *c) {
         if (p) p->next = c->next;
     }
 
-    // Destroy only our own windows. Titlebar dies with frame.
     XDestroyWindow(dpy, c->frame);
 
     free(c->name);
@@ -204,8 +259,7 @@ static void manage(Window w) {
     if (!XGetWindowAttributes(dpy, w, &attr) || attr.override_redirect)
         return;
 
-    // Don't manage our own windows (taskbar, frames, titlebars).
-    if (w == taskbar || find_client_any(w))
+    if (w == taskbar || w == launcher || find_client_any(w))
         return;
 
     Client *c = calloc(1, sizeof(Client));
@@ -248,7 +302,7 @@ static void manage(Window w) {
                  ButtonPressMask |
                  ButtonReleaseMask |
                  PointerMotionMask |
-                 SubstructureNotifyMask);  // see child Unmap/Destroy
+                 SubstructureNotifyMask);
 
     XSelectInput(dpy, c->titlebar,
                  ExposureMask |
@@ -256,7 +310,6 @@ static void manage(Window w) {
                  ButtonReleaseMask |
                  PointerMotionMask);
 
-    // NORMAL input on client: no passive grab, just listen for ButtonPress.
     XSelectInput(dpy, c->win,
                  PropertyChangeMask |
                  EnterWindowMask |
@@ -264,7 +317,6 @@ static void manage(Window w) {
                  FocusChangeMask |
                  ButtonPressMask);
 
-    // Reparent client into our frame
     XReparentWindow(dpy, c->win, c->frame, 0, TITLE_HEIGHT);
 
     XSetWMProtocols(dpy, c->win, &WM_DELETE_WINDOW, 1);
@@ -280,7 +332,7 @@ static void manage(Window w) {
     draw_taskbar();
 }
 
-/* ---------- Forward declarations for dispatcher ---------- */
+/* ---------- Forward declarations ---------- */
 
 static void handle_map_request(XEvent *e);
 static void handle_destroy_notify(XEvent *e);
@@ -290,8 +342,9 @@ static void handle_client_message(XEvent *e);
 static void handle_button_press(XEvent *e);
 static void handle_expose(XEvent *e);
 static void handle_property_notify(XEvent *e);
+static void handle_key_press(XEvent *e);
 
-/* ---------- Event dispatcher (used in move/resize loops) ---------- */
+/* ---------- Dispatcher ---------- */
 
 static void dispatch_event(XEvent *e) {
     switch (e->type) {
@@ -319,9 +372,63 @@ static void dispatch_event(XEvent *e) {
     case PropertyNotify:
         handle_property_notify(e);
         break;
+    case KeyPress:
+        handle_key_press(e);
+        break;
     default:
         break;
     }
+}
+
+/* ---------- Minimize / Maximize ---------- */
+
+static void minimize_client(Client *c) {
+    if (!c || c->minimized) return;
+    c->minimized = 1;
+    XUnmapWindow(dpy, c->frame);
+    draw_taskbar();
+}
+
+static void restore_client(Client *c) {
+    if (!c || !c->minimized) return;
+    c->minimized = 0;
+    XMapWindow(dpy, c->frame);
+    focus_client(c);
+    draw_taskbar();
+}
+
+static void maximize_client(Client *c) {
+    if (!c) return;
+
+    int sw = DisplayWidth(dpy, screen);
+    int sh = DisplayHeight(dpy, screen);
+
+    if (!c->maximized) {
+        c->old_x = c->x;
+        c->old_y = c->y;
+        c->old_w = c->w;
+        c->old_h = c->h;
+
+        c->x = 0;
+        c->y = 0;
+        c->w = sw;
+        c->h = sh - TASKBAR_HEIGHT - TITLE_HEIGHT;
+
+        c->maximized = 1;
+    } else {
+        c->x = c->old_x;
+        c->y = c->old_y;
+        c->w = c->old_w;
+        c->h = c->old_h;
+
+        c->maximized = 0;
+    }
+
+    XMoveResizeWindow(dpy, c->frame, c->x, c->y, c->w, c->h + TITLE_HEIGHT);
+    XMoveResizeWindow(dpy, c->win, 0, TITLE_HEIGHT, c->w, c->h);
+    XMoveResizeWindow(dpy, c->titlebar, 0, 0, c->w, TITLE_HEIGHT);
+    draw_title(c);
+    draw_taskbar();
 }
 
 /* ---------- Alt+Right drag resize ---------- */
@@ -368,7 +475,6 @@ static void start_resize(Client *c, int start_x, int start_y) {
         } else if (ev.type == ButtonRelease) {
             break;
         } else {
-            // Keep handling other events (Expose, etc.) during resize.
             dispatch_event(&ev);
         }
     }
@@ -376,13 +482,47 @@ static void start_resize(Client *c, int start_x, int start_y) {
     XUngrabPointer(dpy, CurrentTime);
 }
 
+/* ---------- Launcher ---------- */
+
+static void spawn_command(const char *cmd) {
+    if (!cmd || !*cmd) return;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+}
+
+static void show_launcher(void) {
+    if (launcher_visible) return;
+    launcher_visible = 1;
+    launcher_len = 0;
+    launcher_buf[0] = '\0';
+    XMapRaised(dpy, launcher);
+    XSetInputFocus(dpy, launcher, RevertToPointerRoot, CurrentTime);
+    draw_launcher();
+}
+
+static void hide_launcher(void) {
+    if (!launcher_visible) return;
+    launcher_visible = 0;
+    XUnmapWindow(dpy, launcher);
+}
+
+static void toggle_launcher(void) {
+    if (launcher_visible)
+        hide_launcher();
+    else
+        show_launcher();
+}
+
 /* ---------- Event handlers ---------- */
 
 static void handle_map_request(XEvent *e) {
     XMapRequestEvent *ev = &e->xmaprequest;
 
-    // Ignore our own windows.
-    if (ev->window == taskbar || find_client_any(ev->window))
+    if (ev->window == taskbar || ev->window == launcher || find_client_any(ev->window))
         return;
 
     if (!find_client_by_win(ev->window)) {
@@ -403,7 +543,11 @@ static void handle_unmap_notify(XEvent *e) {
     Client *c = find_client_by_win(ev->window);
     if (!c) return;
 
-    // Many toolkits "close" by unmapping; treat that as gone.
+    if (c->minimized) {
+        // We caused this via minimize; don't unmanage.
+        return;
+    }
+
     unmanage(c);
 }
 
@@ -440,7 +584,6 @@ static void handle_client_message(XEvent *e) {
         (Atom)ev->data.l[0] == WM_DELETE_WINDOW) {
         Client *c = find_client_by_win(ev->window);
         if (c) {
-            // Ask client to close; visuals will disappear on Unmap/Destroy.
             XEvent msg = *e;
             msg.xclient.window = c->win;
             XSendEvent(dpy, c->win, False, NoEventMask, &msg);
@@ -463,7 +606,10 @@ static void handle_button_press(XEvent *e) {
         int i = 0;
         for (Client *c = clients; c; c = c->next, i++) {
             if (i == index) {
-                focus_client(c);
+                if (c->minimized)
+                    restore_client(c);
+                else
+                    focus_client(c);
                 draw_taskbar();
                 break;
             }
@@ -471,10 +617,16 @@ static void handle_button_press(XEvent *e) {
         return;
     }
 
+    if (ev->window == launcher) {
+        // Click inside launcher: just focus it.
+        XSetInputFocus(dpy, launcher, RevertToPointerRoot, CurrentTime);
+        return;
+    }
+
     Client *c = find_client_any(ev->window);
     if (!c) return;
 
-    // Alt + RightClick anywhere on the window: resize from bottom-right.
+    // Alt + RightClick anywhere: resize
     if ((ev->state & Mod1Mask) && ev->button == Button3) {
         focus_client(c);
         draw_taskbar();
@@ -482,7 +634,7 @@ static void handle_button_press(XEvent *e) {
         return;
     }
 
-    // click on client content: focus + let client handle the click
+    // Click on client content: focus
     if (ev->window == c->win && ev->button == Button1) {
         focus_client(c);
         draw_taskbar();
@@ -490,8 +642,11 @@ static void handle_button_press(XEvent *e) {
     }
 
     if (ev->window == c->titlebar && ev->button == Button1) {
-        // close button
-        if (ev->x >= c->w - CLOSE_WIDTH) {
+        int close_x = c->w - CLOSE_WIDTH;
+        int max_x   = close_x - MAX_WIDTH;
+        int min_x   = max_x - MINIMIZE_WIDTH;
+
+        if (ev->x >= close_x) {
             if (WM_DELETE_WINDOW != None) {
                 XEvent msg;
                 memset(&msg, 0, sizeof(msg));
@@ -503,10 +658,14 @@ static void handle_button_press(XEvent *e) {
                 msg.xclient.data.l[1] = CurrentTime;
                 XSendEvent(dpy, c->win, False, NoEventMask, &msg);
             } else {
-                // Fallback: kill client if it doesn't support WM_DELETE_WINDOW.
                 XKillClient(dpy, c->win);
             }
-            // Wait for Unmap/Destroy to unmanage.
+            return;
+        } else if (ev->x >= max_x && ev->x < close_x) {
+            maximize_client(c);
+            return;
+        } else if (ev->x >= min_x && ev->x < max_x) {
+            minimize_client(c);
             return;
         }
 
@@ -537,7 +696,6 @@ static void handle_button_press(XEvent *e) {
             } else if (ev2.type == ButtonRelease) {
                 break;
             } else {
-                // Don't drop Expose/Map/etc. while moving; handle them.
                 dispatch_event(&ev2);
             }
         }
@@ -547,7 +705,6 @@ static void handle_button_press(XEvent *e) {
     }
 
     if (ev->window == c->frame && ev->button == Button1) {
-        // For now: just focus on frame click.
         focus_client(c);
         draw_taskbar();
     }
@@ -557,6 +714,10 @@ static void handle_expose(XEvent *e) {
     XExposeEvent *ev = &e->xexpose;
     if (ev->window == taskbar) {
         draw_taskbar();
+        return;
+    }
+    if (ev->window == launcher) {
+        draw_launcher();
         return;
     }
     Client *c = find_client_any(ev->window);
@@ -574,6 +735,45 @@ static void handle_property_notify(XEvent *e) {
             draw_title(c);
             draw_taskbar();
         }
+    }
+}
+
+static void handle_key_press(XEvent *e) {
+    XKeyEvent *ev = &e->xkey;
+    KeySym sym = XLookupKeysym(ev, 0);
+
+    if (ev->window == root) {
+        if ((ev->state & Mod1Mask) && sym == XK_p) {
+            toggle_launcher();
+        }
+        return;
+    }
+
+    if (ev->window == launcher && launcher_visible) {
+        if (sym == XK_Escape) {
+            hide_launcher();
+        } else if (sym == XK_Return) {
+            launcher_buf[launcher_len] = '\0';
+            spawn_command(launcher_buf);
+            hide_launcher();
+        } else if (sym == XK_BackSpace) {
+            if (launcher_len > 0) {
+                launcher_len--;
+                launcher_buf[launcher_len] = '\0';
+            }
+        } else {
+            char buf[8];
+            int len = XLookupString(ev, buf, sizeof(buf), NULL, NULL);
+            if (len > 0) {
+                for (int i = 0; i < len; i++) {
+                    if (launcher_len < (int)sizeof(launcher_buf) - 1) {
+                        launcher_buf[launcher_len++] = buf[i];
+                    }
+                }
+                launcher_buf[launcher_len] = '\0';
+            }
+        }
+        draw_launcher();
     }
 }
 
@@ -610,6 +810,14 @@ static void setup_colors(void) {
     XParseColor(dpy, cmap, "#d8dee9", &col);
     XAllocColor(dpy, cmap, &col);
     taskbar_fg = col.pixel;
+
+    XParseColor(dpy, cmap, "#2e3440", &col);
+    XAllocColor(dpy, cmap, &col);
+    launcher_bg = col.pixel;
+
+    XParseColor(dpy, cmap, "#eceff4", &col);
+    XAllocColor(dpy, cmap, &col);
+    launcher_fg = col.pixel;
 }
 
 static void setup_taskbar(void) {
@@ -617,7 +825,7 @@ static void setup_taskbar(void) {
     int sh = DisplayHeight(dpy, screen);
 
     XSetWindowAttributes wa;
-    wa.override_redirect = True;  // don't manage our own taskbar
+    wa.override_redirect = True;
     wa.background_pixel = taskbar_bg;
     wa.border_pixel = border_unfocus;
 
@@ -639,6 +847,40 @@ static void setup_taskbar(void) {
                  ButtonReleaseMask);
 
     XMapWindow(dpy, taskbar);
+}
+
+static void setup_launcher(void) {
+    int sw = DisplayWidth(dpy, screen);
+    int sh = DisplayHeight(dpy, screen);
+
+    int lw = 400;
+    int lh = 30;
+    int lx = (sw - lw) / 2;
+    int ly = (sh - lh) / 3;
+
+    XSetWindowAttributes wa;
+    wa.override_redirect = True;
+    wa.background_pixel = launcher_bg;
+    wa.border_pixel = border_unfocus;
+
+    launcher = XCreateWindow(
+        dpy, root,
+        lx, ly,
+        lw, lh,
+        1,
+        DefaultDepth(dpy, screen),
+        CopyFromParent,
+        DefaultVisual(dpy, screen),
+        CWOverrideRedirect | CWBackPixel | CWBorderPixel,
+        &wa
+    );
+
+    XSelectInput(dpy, launcher,
+                 ExposureMask |
+                 KeyPressMask |
+                 ButtonPressMask);
+
+    launcher_visible = 0;
 }
 
 /* ---------- main ---------- */
@@ -666,42 +908,21 @@ int main(void) {
                  ButtonPressMask |
                  ButtonReleaseMask |
                  PointerMotionMask |
-                 PropertyChangeMask);
+                 PropertyChangeMask |
+                 KeyPressMask);
+
+    // Grab Alt+R on root for launcher
+    KeyCode rcode = XKeysymToKeycode(dpy, XK_r);
+    XGrabKey(dpy, rcode, Mod1Mask, root, True,
+             GrabModeAsync, GrabModeAsync);
 
     setup_taskbar();
+    setup_launcher();
 
     for (;;) {
         XEvent e;
         XNextEvent(dpy, &e);
-
-        switch (e.type) {
-        case MapRequest:
-            handle_map_request(&e);
-            break;
-        case DestroyNotify:
-            handle_destroy_notify(&e);
-            break;
-        case UnmapNotify:
-            handle_unmap_notify(&e);
-            break;
-        case ConfigureRequest:
-            handle_configure_request(&e);
-            break;
-        case ClientMessage:
-            handle_client_message(&e);
-            break;
-        case ButtonPress:
-            handle_button_press(&e);
-            break;
-        case Expose:
-            handle_expose(&e);
-            break;
-        case PropertyNotify:
-            handle_property_notify(&e);
-            break;
-        default:
-            break;
-        }
+        dispatch_event(&e);
     }
 
     XCloseDisplay(dpy);
