@@ -21,7 +21,7 @@
 4. "Eye candy" features (They waste performance and add unnecassary programming work. Im one person. not 20!)
 
 # KNOWN ISSUES
-1. for some reason, clicking and dragging in chromium when there is no button will cause the content to be dragged. I have NO IDEA why this happens. Please tell me if you have found a patch.
+1. trying to move the content of a window with a custom titlebar will cause it to move, I think it is an issue with how I am handling titlebars, please open a PR if you believe you have found a fix.
 
 # SCREENSHOTS!
 <p align="center">
