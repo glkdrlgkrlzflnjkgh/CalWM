@@ -23,7 +23,7 @@
 # KNOWN ISSUES
 1. trying to move the content of a window with a custom titlebar will cause it to move, I think it is an issue with how I am handling titlebars, please open a PR if you believe you have found a fix.
 
-# SCREENSHOTS!
+# SCREENSHOTS! (locally taken in WSL2)
 <p align="center">
   <img src="screenshots/screenshot_001.png" alt="CalWM running Xterm, Xclock and Xeyes">
 </p>
