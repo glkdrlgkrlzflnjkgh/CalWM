@@ -115,7 +115,7 @@ static void update_client_name(Client *c) {
         XFree(prop.value);
     } else {
         if (!c->name)
-            c->name = strdup("<Window?>");
+            c->name = strdup("<No Name Specified....>");
     }
 }
 
@@ -163,7 +163,7 @@ static void draw_title(Client *c) {
     XSetForeground(dpy, gc, border_unfocus);
     XFillRectangle(dpy, c->titlebar, gc, close_x, 0, CLOSE_WIDTH, TITLE_HEIGHT);
     XSetForeground(dpy, gc, title_fg);
-    XDrawString(dpy, c->titlebar, gc, close_x + 6, TITLE_HEIGHT - 8, "CL", 1);
+    XDrawString(dpy, c->titlebar, gc, close_x + 6, TITLE_HEIGHT - 8, "X", 1);
 
     update_client_name(c);
     if (c->name) {
